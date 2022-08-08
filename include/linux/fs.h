@@ -306,6 +306,7 @@ enum rw_hint {
 #define IOCB_HIPRI		(__force int) RWF_HIPRI
 #define IOCB_DSYNC		(__force int) RWF_DSYNC
 #define IOCB_SYNC		(__force int) RWF_SYNC
+/*IOCB_NOWAIT表示如果在不进行IO请求读取物理介质的前提下便无法读取文件数据，此时应返回-EAGAIN*/
 #define IOCB_NOWAIT		(__force int) RWF_NOWAIT
 #define IOCB_APPEND		(__force int) RWF_APPEND
 
@@ -314,7 +315,13 @@ enum rw_hint {
 #define IOCB_DIRECT		(1 << 17)
 #define IOCB_WRITE		(1 << 18)
 /* iocb->ki_waitq is valid */
+/* waiting for a page to become unlocked, or locking the page, requires waiting for IO to complete*/
 #define IOCB_WAITQ		(1 << 19)
+
+/* The IOCB_NOIO flag in iocb->ki_flags indicates that -EAGAIN shall be
+ * returned when no data can be read without issuing new I/O requests, 
+ * and 0 shall be returned when readhead would have been triggered.
+ * */
 #define IOCB_NOIO		(1 << 20)
 
 struct kiocb {
@@ -365,35 +372,51 @@ typedef int (*read_actor_t)(read_descriptor_t *, struct page *,
 		unsigned long, unsigned long);
 
 struct address_space_operations {
+	/*将文件在内存页面(一个page)中的数据更新到磁盘上*/
 	int (*writepage)(struct page *page, struct writeback_control *wbc);
+	/*从磁盘中读取数据到内存页面（一个page）中,其中page参数中给出了所读取页面在页面缓存中的索引位置*/
 	int (*readpage)(struct file *, struct page *);
 
 	/* Write back some dirty pages from this mapping. */
+	/* 从地址空间address_space写多个内存页面到磁盘
+	 * 如果同步模式为WB_SYNC_ALL，则writeback_control参数指定写出页面范围
+	 * 如果同步模式为WB_SYNC_NONE,则writeback_control参数指定写出页面数目
+	 * */
 	int (*writepages)(struct address_space *, struct writeback_control *);
 
 	/* Set a page dirty.  Return true if this dirtied it */
+	/* 将页面设置为脏，如ext2文件系统ext2_aops该方法设置为空*/
 	int (*set_page_dirty)(struct page *page);
 
 	/*
 	 * Reads in the requested pages. Unlike ->readpage(), this is
 	 * PURELY used for read-ahead!.
 	 */
+	/* 从磁盘读取多个页面到地址空间，入参pages指向页面链表头，入参nr_pages为链表中的页面数目*/
 	int (*readpages)(struct file *filp, struct address_space *mapping,
 			struct list_head *pages, unsigned nr_pages);
 	void (*readahead)(struct readahead_control *);
 
+	/* write_begin/end 组合完成将给定偏移和长度的数据写入到文件，write_begin通知文件系统负责必要
+	 * 页面分配及磁盘数据读取，调用者完成数据复制到内存页面后，再调用write_end告诉文件系统数据复制
+	 * 完成，可以将内存页面数据提交到磁盘了。
+	 * 入参pos表示要写入数据的page内偏移；入参len表示要写入数据长度，大小应小于page size;入参pagep输
+	 * 入输出参数，输入NULL时，则文件系统需要返回一个分配页面，以便调用者写入数据*/
 	int (*write_begin)(struct file *, struct address_space *mapping,
 				loff_t pos, unsigned len, unsigned flags,
 				struct page **pagep, void **fsdata);
+	/* 入参copied表示实际已从用户缓冲区复制到页面的字节数*/
 	int (*write_end)(struct file *, struct address_space *mapping,
 				loff_t pos, unsigned len, unsigned copied,
 				struct page *page, void *fsdata);
 
 	/* Unfortunately this kludge is needed for FIBMAP. Don't use it */
 	sector_t (*bmap)(struct address_space *, sector_t);
+	/* 使某个页面部分或全部失效,如ext2文件系统ext2_aops该方法设置为空*/
 	void (*invalidatepage) (struct page *, unsigned int, unsigned int);
 	int (*releasepage) (struct page *, gfp_t);
 	void (*freepage)(struct page *);
+	/* 绕过页面缓存，在磁盘和应用程序间进行直接数据传输。iov_iter->type*表明是读还是写操作。*/
 	ssize_t (*direct_IO)(struct kiocb *, struct iov_iter *iter);
 	/*
 	 * migrate the contents of a page to the specified target. If
@@ -1824,7 +1847,9 @@ struct file_operations {
 	loff_t (*llseek) (struct file *, loff_t, int);
 	ssize_t (*read) (struct file *, char __user *, size_t, loff_t *);
 	ssize_t (*write) (struct file *, const char __user *, size_t, loff_t *);
+	/*可能异步从存储介质读取数据到目的地iov_iter,异步意味着进程可能休眠等待磁盘IO结束*/
 	ssize_t (*read_iter) (struct kiocb *, struct iov_iter *);
+	/*可能异步从源iov_iter写数据到存储介质*/
 	ssize_t (*write_iter) (struct kiocb *, struct iov_iter *);
 	int (*iopoll)(struct kiocb *kiocb, bool spin);
 	int (*iterate) (struct file *, struct dir_context *);

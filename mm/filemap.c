@@ -2512,6 +2512,7 @@ generic_file_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 	if (!count)
 		goto out; /* skip atime */
 
+	/*direct io 读取操作*/
 	if (iocb->ki_flags & IOCB_DIRECT) {
 		struct file *file = iocb->ki_filp;
 		struct address_space *mapping = file->f_mapping;

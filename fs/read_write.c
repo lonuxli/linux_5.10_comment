@@ -622,7 +622,8 @@ static inline loff_t *file_ppos(struct file *file)
 
 ssize_t ksys_read(unsigned int fd, char __user *buf, size_t count)
 {
-	struct fd f = fdget_pos(fd);
+	/*struct fd 只是简单包裹了struct file和int flags*/
+	struct fd f = fdget_pos(fd); /*核心作用是通过fd获取内核文件描述struct file结构*/
 	ssize_t ret = -EBADF;
 
 	if (f.file) {
@@ -633,12 +634,13 @@ ssize_t ksys_read(unsigned int fd, char __user *buf, size_t count)
 		}
 		ret = vfs_read(f.file, buf, count, ppos);
 		if (ret >= 0 && ppos)
-			f.file->f_pos = pos;
+			f.file->f_pos = pos; /*非流式文件，读后需要更新file的pos值*/
 		fdput_pos(f);
 	}
 	return ret;
 }
 
+/*read 系统调用*/
 SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
 {
 	return ksys_read(fd, buf, count);

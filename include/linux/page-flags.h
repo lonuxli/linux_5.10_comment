@@ -102,9 +102,13 @@
  * SPARSEMEM_EXTREME with !SPARSEMEM_VMEMMAP).
  */
 enum pageflags {
+	/* 指定了页是否被锁定, 如果该比特被置位, 说明有使用者正在操作该page, 则内核的其他部分不允许访问该页*/
 	PG_locked,		/* Page is locked. Don't touch. */
+	/*表示page刚刚被访问过*/
 	PG_referenced,
+	/*表示page的数据已经与后备存储器是同步的, 即页的数据已经从块设备读取，且没有出错,数据是最新的*/
 	PG_uptodate,
+	/*与后备存储器中的数据相比，该page的内容已经被修改. */
 	PG_dirty,
 	PG_lru,
 	PG_active,
@@ -117,11 +121,11 @@ enum pageflags {
 	PG_reserved,
 	PG_private,		/* If pagecache, has fs-private data */
 	PG_private_2,		/* If pagecache, has fs aux data */
-	PG_writeback,		/* Page is under writeback */
+	PG_writeback,		/* Page is under writeback */ /*page中的数据正在被回写到后备存储器*/
 	PG_head,		/* A head page */
-	PG_mappedtodisk,	/* Has blocks allocated on-disk */
+	PG_mappedtodisk,	/* Has blocks allocated on-disk */ /*表示page中的数据在后备存储器中有对应*/
 	PG_reclaim,		/* To be reclaimed asap */
-	PG_swapbacked,		/* Page is backed by RAM/swap */
+	PG_swapbacked,		/* Page is backed by RAM/swap */ /*swap该page的后备存储器是swap*/
 	PG_unevictable,		/* Page is "unevictable"  */
 #ifdef CONFIG_MMU
 	PG_mlocked,		/* Page is vma mlocked */
