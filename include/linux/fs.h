@@ -664,14 +664,18 @@ struct inode {
 		unsigned int __i_nlink;
 	};
 	dev_t			i_rdev;
+	/*i_size为文件长度，单位为字节*/
 	loff_t			i_size;
 	struct timespec64	i_atime;
 	struct timespec64	i_mtime;
 	struct timespec64	i_ctime;
 	spinlock_t		i_lock;	/* i_blocks, i_bytes, maybe i_size */
 	unsigned short          i_bytes;
+	/* i_blkbits为存储介质逻辑块大小，在文件系统格式化时决定.如ext2保存在文件系统inode中,
+	 * 通过ext2_iget()存储介质中inode获取，逻辑块大小可以有1024、 2048、 4096等配置*/
 	u8			i_blkbits;
 	u8			i_write_hint;
+	/*i_blocks为文件长度，按块计算*/
 	blkcnt_t		i_blocks;
 
 #ifdef __NEED_I_SIZE_ORDERED

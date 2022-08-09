@@ -852,6 +852,8 @@ struct buffer_head *alloc_page_buffers(struct page *page, unsigned long size,
 
 	head = NULL;
 	offset = PAGE_SIZE;
+	/* 从后往前开始申请buffer_head，并通过b_this_page单链表连接，最后返回链表头
+	 * 的buffer_head（即低地址/索引块映射的buffer_head）*/
 	while ((offset -= size) >= 0) {
 		bh = alloc_buffer_head(gfp);
 		if (!bh)
@@ -1565,6 +1567,7 @@ void create_empty_buffers(struct page *page,
 		tail = bh;
 		bh = bh->b_this_page;
 	} while (bh);
+	/*将高地址/块索引号映射的buffer_head指向链表头，形成环形链表*/
 	tail->b_this_page = head;
 
 	spin_lock(&page->mapping->private_lock);
@@ -2265,30 +2268,42 @@ int block_read_full_page(struct page *page, get_block_t *get_block)
 	int nr, i;
 	int fully_mapped = 1;
 
+	/* 获取page关联的buffer_head链表头，如果没有则为page创建buffer_head */
 	head = create_page_buffers(page, inode, 0);
 	blocksize = head->b_size;
 	bbits = block_size_bits(blocksize);
 
+	/* 计算出 iblock 为page在文件中的起始块索引号*/
 	iblock = (sector_t)page->index << (PAGE_SHIFT - bbits);
+	/* 计算出 lblock 为文件总的块数量*/
 	lblock = (i_size_read(inode)+blocksize-1) >> bbits;
 	bh = head;
 	nr = 0;
 	i = 0;
 
+	/* do...while循环中尝试处理page的所有的buffer_head，并更新buffer_head相关状态值*/
 	do {
 		if (buffer_uptodate(bh))
 			continue;
 
 		if (!buffer_mapped(bh)) {
+			/* 如果bh未映射到存储介质中的逻辑块，则需调用具体文件系统的get_block()
+			 * 来为bh和对应的存储介质逻辑块建立映射关系*/
 			int err = 0;
 
 			fully_mapped = 0;
 			if (iblock < lblock) {
 				WARN_ON(bh->b_size != blocksize);
+				/* 为bh建立与对应存储介质块的映射关联，注意此处create为0，即read
+				 * 操作遇到文件空洞时不会要求文件系统分配逻辑块*/
 				err = get_block(inode, iblock, bh, 0);
 				if (err)
 					SetPageError(page);
 			}
+			/* 到此处还未将bh与存储介质逻辑块建立映射关系，则可能有两种原因：
+			 * 1、read操作的偏移超出文件大小
+			 * 2、read操作的位置文件存在空洞
+			 * 以上两种情况下都要将页面内容置0，即让用户读到0*/
 			if (!buffer_mapped(bh)) {
 				zero_user(page, i * blocksize, blocksize);
 				if (!err)
@@ -2302,6 +2317,8 @@ int block_read_full_page(struct page *page, get_block_t *get_block)
 			if (buffer_uptodate(bh))
 				continue;
 		}
+		/* arr中为临时记录内存内容与存储介质中逻辑块内容不一致的buffer_head
+		 * 后续需要异步读或进行发出IO请求读*/
 		arr[nr++] = bh;
 	} while (i++, iblock++, (bh = bh->b_this_page) != head);
 

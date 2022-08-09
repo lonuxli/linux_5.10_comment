@@ -153,11 +153,22 @@ struct mpage_readpage_args {
  * represent the validity of its disk mapping and to decide when to do the next
  * get_block() call.
  */
+/* 这个函数试图读取文件中的一个page大小的数据，最理想的情况下就是这个page大小 
+ * 的数据都是在连续的物理磁盘上面的，然后函数只需要提交一个bio请求就可以获取 
+ * 所有的数据，这个函数大部分工作在检查page上所有的物理块是否连续，检查的方法 
+ * 就是调用文件系统提供的get_block函数，如果不连续，需要调用block_read_full_page 
+ * 函数采用buffer 缓冲区的形式来逐个块获取数据*/
+/* 
+ *      1、调用get_block函数检查page中是不是所有的物理块都连续 
+ *      2、如果连续调用mpage_bio_submit函数请求整个page的数据 
+ *      3、如果不连续调用block_read_full_page逐个block读取 
+ */
 static struct bio *do_mpage_readpage(struct mpage_readpage_args *args)
 {
 	struct page *page = args->page;
 	struct inode *inode = page->mapping->host;
 	const unsigned blkbits = inode->i_blkbits;
+	/*计算每个内存页面可以映射存放的该文件系统实例逻辑块个数*/
 	const unsigned blocks_per_page = PAGE_SIZE >> blkbits;
 	const unsigned blocksize = 1 << blkbits;
 	struct buffer_head *map_bh = &args->map_bh;
@@ -186,8 +197,11 @@ static struct bio *do_mpage_readpage(struct mpage_readpage_args *args)
 	if (page_has_buffers(page))
 		goto confused;
 
+	/*计算起始page在文件中所对应的块索引起始值*/
 	block_in_file = (sector_t)page->index << (PAGE_SHIFT - blkbits);
+	/*计算最后page在文件中所对应的最后块索引值*/
 	last_block = block_in_file + args->nr_pages * blocks_per_page;
+	/*计算出文件总的最后一个块索引值*/
 	last_block_in_file = (i_size_read(inode) + blocksize - 1) >> blkbits;
 	if (last_block > last_block_in_file)
 		last_block = last_block_in_file;
@@ -197,6 +211,8 @@ static struct bio *do_mpage_readpage(struct mpage_readpage_args *args)
 	 * Map blocks using the result from the previous get_blocks call first.
 	 */
 	nblocks = map_bh->b_size >> blkbits;
+	/* 大多数情况下，如从ext2_readpage->mpage_readpage->do_mpage_readpage路径进入
+	 * map_bh是一个临时变量，必然不会已经映射到存储介质，因此此处if不会进入*/
 	if (buffer_mapped(map_bh) &&
 			block_in_file > args->first_logical_block &&
 			block_in_file < (args->first_logical_block + nblocks)) {
@@ -248,7 +264,11 @@ static struct bio *do_mpage_readpage(struct mpage_readpage_args *args)
 		 * we just collected from get_block into the page's buffers
 		 * so readpage doesn't have to repeat the get_block call
 		 */
+		/* 有些文件系统实现get_block时，即会将存储介质数据读取到page中，如下是在这种特殊
+		 * 场景下减少IO再次读取数据*/
 		if (buffer_uptodate(map_bh)) {
+			/* 数据已经读入page中，map_buffer_to_page函数只是将map_bh相关值复制给
+			 * page本身关联的buffer_head，但是这种复制操作只能处理page_block这一个块？？？*/
 			map_buffer_to_page(page, map_bh, page_block);
 			goto confused;
 		}

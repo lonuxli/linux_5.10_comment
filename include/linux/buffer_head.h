@@ -59,16 +59,25 @@ typedef void (bh_end_io_t)(struct buffer_head *bh, int uptodate);
  */
 struct buffer_head {
 	unsigned long b_state;		/* buffer state bitmap (see above) */
+	/*用于组成缓冲头循环单链表，每个b_this_page指向链表中的下一个缓冲头的指针*/
 	struct buffer_head *b_this_page;/* circular list of page's buffers */
 	struct page *b_page;		/* the page this bh is mapped to */
 
+	/*在块设备上的逻辑块号,即块在磁盘或者分区中的编号*/
 	sector_t b_blocknr;		/* start block number */
 	size_t b_size;			/* size of mapping */
+        /**
+	 * 块在缓冲区页内的位置，b_data的值依赖于页是否在高端内存。
+	 * 如果在高端内存，则b_data字段存放的是块缓冲区相对于页的起始位置的偏移量。
+	 * 否则存放的是块缓冲区的线性地址。
+	 **/
 	char *b_data;			/* pointer to data within the page */
 
 	struct block_device *b_bdev;
+	/* b_end_io为I/O完成时调用的函数方法，b_private为调用方法的入参*/
 	bh_end_io_t *b_end_io;		/* I/O completion */
- 	void *b_private;		/* reserved for b_end_io */
+	void *b_private;		/* reserved for b_end_io */
+
 	struct list_head b_assoc_buffers; /* associated with another mapping */
 	struct address_space *b_assoc_map;	/* mapping this buffer is
 						   associated with */

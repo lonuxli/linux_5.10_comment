@@ -112,8 +112,11 @@ void ext2_evict_inode(struct inode * inode)
 }
 
 typedef struct {
+	/*p存放读入内存的块条目（即跟踪路径条目）地址，地址存放的内容即key*/
 	__le32	*p;
+	/*key存放跟踪路径下一级的块号，最后一级存储的是数据块号*/
 	__le32	key;
+	/*bh指向块路径中的间接块*/
 	struct buffer_head *bh;
 } Indirect;
 
@@ -617,6 +620,13 @@ static void ext2_splice_branch(struct inode *inode,
  * return = 0, if plain lookup failed.
  * return < 0, error case.
  */
+/**
+ * 获取文件中索引号为iblock对应的存储介质上的逻辑块号。如果块不存在，就自动为文件在存储介质上分配逻辑块。
+ * 尽量在最后一次分配的块附近搜索块，必要时会在其他块组中获得空闲块。同时还采用预分配策略。
+ * maxblocks由上层传递下来，表示最多可以连续映射的块数目
+ * bno作为返回给调用方，表示找到的存储介质中逻辑块号的起始值（可能找到多个块）
+ * new作为返回给调用方，表示ext2_get_blocks过程中是否在存储介质中为文件分配了新的逻辑块
+ */
 static int ext2_get_blocks(struct inode *inode,
 			   sector_t iblock, unsigned long maxblocks,
 			   u32 *bno, bool *new, bool *boundary,
@@ -636,17 +646,26 @@ static int ext2_get_blocks(struct inode *inode,
 
 	BUG_ON(maxblocks == 0);
 
+	/*计算块的路径，返回值depth为多层间接层级数，offsets每一层级的偏移*/
 	depth = ext2_block_to_path(inode,iblock,offsets,&blocks_to_boundary);
 
 	if (depth == 0)
 		return -EIO;
 
+	/*
+	 * 根据depth/offset获取iblock在存储介质中的块号路径，通过数组chain返回结果
+	 * 返回值partial为null时表明路径中的块在存储介质中均已分配，否则表示partial这
+	 * 一层指向的块未分配。
+	 **/
 	partial = ext2_get_branch(inode, depth, offsets, chain, &err);
 	/* Simplest case - block found, no allocation needed */
 	if (!partial) {
+		/* 获取间接中最后一个层级的key值，即最终存储介质中逻辑块号（存的文件数据）*/
 		first_block = le32_to_cpu(chain[depth - 1].key);
 		count++;
 		/*map more blocks*/
+		/* 通过while循环尽可能映射多的blocks，只有当存储介质中的first_block块及其
+		 * 随后的块物理上连续且在文件中的索引也连续，就能一次映射多个块*/
 		while (count < maxblocks && count <= blocks_to_boundary) {
 			ext2_fsblk_t blk;
 
@@ -662,6 +681,9 @@ static int ext2_get_blocks(struct inode *inode,
 				partial = chain + depth - 1;
 				break;
 			}
+			/* (chain[depth-1].p表示的是最后一层间接块对应iblock索引的块条目在内存中的地址
+			 * count为在文件中块索引号连续且在存储介质中逻辑块号连续（物理上连续）的
+			 * 块数目，当然这些块存储的是文件数据。*/
 			blk = le32_to_cpu(*(chain[depth-1].p + count));
 			if (blk == first_block + count)
 				count++;
@@ -669,7 +691,7 @@ static int ext2_get_blocks(struct inode *inode,
 				break;
 		}
 		if (err != -EAGAIN)
-			goto got_it;
+			goto got_it; /*已找到且存储介质中已分配块，直接跳转到函数出口*/
 	}
 
 	/* Next simple case - plain lookup or failed read of indirect block */
@@ -763,6 +785,7 @@ static int ext2_get_blocks(struct inode *inode,
 got_it:
 	if (count > blocks_to_boundary)
 		*boundary = true;
+	/*count作为返回值，即找到的在逻辑块号连续且块在文件中索引均连续的块数目*/
 	err = count;
 	/* Clean up and exit */
 	partial = chain + depth - 1;	/* the whole chain */
@@ -771,6 +794,7 @@ cleanup:
 		brelse(partial->bh);
 		partial--;
 	}
+	/*bno为找到的存储介质中逻辑块号的起始值（可能找到多个块）*/
 	if (err > 0)
 		*bno = le32_to_cpu(chain[depth-1].key);
 	return err;
