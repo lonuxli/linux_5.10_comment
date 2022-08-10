@@ -748,9 +748,13 @@ static inline bool page_is_mergeable(const struct bio_vec *bv,
 	if (xen_domain() && !xen_biovec_phys_mergeable(bv, page))
 		return false;
 
+	/* same_page表示bv->bv_page指向的最后一个页（即page+off+len算出的页）与入参page
+	 * 是否在同一物理页面中，但是page+off+len正好落在page页边界这种情况不包括*/
 	*same_page = ((vec_end_addr & PAGE_MASK) == page_addr);
 	if (*same_page)
 		return true;
+	/*下面这段代码是兼容当入参off大于pagesize时，且入参off不为pagesize的整数倍时，即
+	 * （bv_page+off+len）没有落在页边界处的情况，也能返回true支持merge*/
 	return (bv->bv_page + bv_end / PAGE_SIZE) == (page + off / PAGE_SIZE);
 }
 
@@ -875,6 +879,7 @@ bool __bio_try_merge_page(struct bio *bio, struct page *page,
 		return false;
 
 	if (bio->bi_vcnt > 0) {
+		/* 取出数组中最后一个bio_vec来判断是否能合并，为何是最后一个？？*/
 		struct bio_vec *bv = &bio->bi_io_vec[bio->bi_vcnt - 1];
 
 		if (page_is_mergeable(bv, page, len, off, same_page)) {

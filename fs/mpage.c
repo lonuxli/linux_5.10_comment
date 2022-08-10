@@ -244,12 +244,16 @@ static struct bio *do_mpage_readpage(struct mpage_readpage_args *args)
 
 		if (block_in_file < last_block) {
 			map_bh->b_size = (last_block-block_in_file) << blkbits;
+			/*最后一个入参create为0，意味着遇到文件空洞不会为bh建立映射及分配存储介质逻辑块*/
 			if (args->get_block(inode, block_in_file, map_bh, 0))
 				goto confused;
 			args->first_logical_block = block_in_file;
 		}
 
 		if (!buffer_mapped(map_bh)) {
+			/* 此时如果map_bh还未映射到存储介质逻辑块，则存在两种可能：
+			 * 1、读取块索引block_in_file超出文件尾
+			 * 2、读取块索引block_in_file位于文件空洞处*/
 			fully_mapped = 0;
 			if (first_hole == blocks_per_page)
 				first_hole = page_block;
@@ -272,13 +276,21 @@ static struct bio *do_mpage_readpage(struct mpage_readpage_args *args)
 			map_buffer_to_page(page, map_bh, page_block);
 			goto confused;
 		}
-	
+
+		/* page中存在buffer_head为hole且其后的buffer_head又映射到了存储介质逻辑块,如：
+		 * 1) |--block--|--hole---|--block--|
+		 * 2）|--hole---|--hole---|--block--|*/
 		if (first_hole != blocks_per_page)
 			goto confused;		/* hole -> non-hole */
 
 		/* Contiguous blocks? */
+		/* block数组用来记录page关联的buffer_head的逻辑块号（b_blocknr），hole对应的不会记录*/
 		if (page_block && blocks[page_block-1] != map_bh->b_blocknr-1)
 			goto confused;
+		/* 文件系统的get_block()可能可以获取到多个文件索引连续且存储介质中逻辑块号连续的块，
+		 * 其总大小记录在map_bh->b_size, 因此nblock记录了一次从get_block获取的连续块数目,下面
+		 * for循环则遍历这些连续块，并将其逻辑块号记录在blocks数组中，方便后续判断内存页关联
+		 * 的buffer_head映射的逻辑块是否连续 */
 		nblocks = map_bh->b_size >> blkbits;
 		for (relative_block = 0; ; relative_block++) {
 			if (relative_block == nblocks) {
@@ -293,9 +305,13 @@ static struct bio *do_mpage_readpage(struct mpage_readpage_args *args)
 		bdev = map_bh->b_bdev;
 	}
 
+	/* 运行到此处，说明从page_block [first_hole -> blocks_per_page-1] 这段区间map_bh均没有映射到
+	 * 存储介质逻辑块,使得如上while循环有经历goto/break退出，直到while条件变false*/
 	if (first_hole != blocks_per_page) {
+		/* 将page中对应的[first_hole -> blocks_per_page-1]索引块内存置0，表明读hole文件返回0 */
 		zero_user_segment(page, first_hole << blkbits, PAGE_SIZE);
 		if (first_hole == 0) {
+			/* 如果first_hole==0，说明整个page都是hole没有映射，因此无需为该page读取存储介质内容*/
 			SetPageUptodate(page);
 			unlock_page(page);
 			goto out;
@@ -310,6 +326,14 @@ static struct bio *do_mpage_readpage(struct mpage_readpage_args *args)
 		goto confused;
 	}
 
+
+	/* 运行到此处，page映射情况只有如下两种可能：
+	 * 1) 整个page的buffer_head都被映射到了连续的存储介质逻辑块,即first_hole == blocks_per_page
+	 *    |--block0--|--block1--|--block2--|--block2--|
+	 * 2）page的前面的buffer_head被映射到了连续的存储介质逻辑块，后一部分buffer_head没有映射为
+	 * hole，即0 < first_hole < blocks_per_page 
+	 *    |--block0--|--block1--|---hole---|---hole---| */
+
 	/*
 	 * This page will go to BIO.  Do we need to send this BIO off first?
 	 */
@@ -319,6 +343,7 @@ static struct bio *do_mpage_readpage(struct mpage_readpage_args *args)
 alloc_new:
 	if (args->bio == NULL) {
 		if (first_hole == blocks_per_page) {
+			/* 整个page被映射到存储介质连续逻辑块，直接读取一个page, 成功则直接退出 */
 			if (!bdev_read_page(bdev, blocks[0] << (blkbits - 9),
 								page))
 				goto out;
@@ -331,8 +356,14 @@ alloc_new:
 			goto confused;
 	}
 
+	/* 计算page中去除后段空洞后要从存储介质读取数据的长度 */
 	length = first_hole << blkbits;
+	/* 将page加入bio中，length为要读取数据的长度，off为页内偏移，如下：
+	 * 0<-------length--->first_hole-----------page_size
+	 * |          |          |                     |
+	 * |--block0--|--block1--|---hole---|---hole---| */
 	if (bio_add_page(args->bio, page, length, 0) < length) {
+		/* bio已满，导致page加入bio失败，于是通过mpage_bio_submit提交bio，并返回NULL*/
 		args->bio = mpage_bio_submit(REQ_OP_READ, op_flags, args->bio);
 		goto alloc_new;
 	}
@@ -351,6 +382,7 @@ confused:
 	if (args->bio)
 		args->bio = mpage_bio_submit(REQ_OP_READ, op_flags, args->bio);
 	if (!PageUptodate(page))
+		/* 遍历page的所有的buffer_head，一个个buffer_head单独进行IO读取*/
 		block_read_full_page(page, args->get_block);
 	else
 		unlock_page(page);

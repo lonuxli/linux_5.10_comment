@@ -201,23 +201,82 @@ static inline void bio_issue_init(struct bio_issue *issue,
  * stacking drivers)
  */
 struct bio {
+	/* 若一个req中包含多个bio，这些bio通过bi_next组成单向链表，链表以NULL结尾。（bio
+	 * merge导致一个req中存在多个bio，如果没有merge，一个bio对应一个req） */
 	struct bio		*bi_next;	/* request queue link */
+	/* bio待操作的存储设备（linux块设备代码用struct gendisk描述一个实际的disk）*/
 	struct gendisk		*bi_disk;
+	/* 高8位表示operation，范围0~255，代码中用REQ_OP_XX表示某个operation，如REQ_OP_READ。
+	 * 低24表示flag，每个bit对应一个flag，代码中用REQ_xx表示某个flag，如REQ_SYNC。*/
 	unsigned int		bi_opf;		/* bottom bits req flags,
 						 * top bits REQ_OP. Use
 						 * accessors.
 						 */
+
+	/* 高3位表示bio->bi_io_vec指向的内存空间是从哪个bvec pool中分配的（这块空间中存放了多个struct
+	 * bio_vec），代码中一共定义了BVEC_POOL_NR（值为6）个bvec pool见数组 struct biovec_slab bvec_slabs[BVEC_POOL_NR]
+	 *
+	 * 低13位表示bio的标记，值范围0~2^13，用BIO_XX表示，如BIO_CHAIN表示该bio是bio
+	 * chain中的一个（bio拆分后或者md驱动中，多个bio形成bio chain）*/
 	unsigned short		bi_flags;	/* status, etc and bvec pool number */
+
+	/* io优先级，IOPRIO_CLASS_XX（其中XX为NONE、RT、BE、IDLE）.并不是所有io调度器都会用到这个变量。
+	 * io调度器（如bfq）针对不同优先级io的行为是不一样的。在bio merge或req merge时，不同的优先级的
+	 * bio或req不允许merge。*/
 	unsigned short		bi_ioprio;
+
+	/* 描述bio待写数据的life time属性，代码中用WRITE_LIFE_XX表示（其中XX为NOT_SET、NONE、SHORT、MEDIUM、LONG、EXTREME）。
+	 * 按数据在存储设备上存在的时间长短排序，SHORT < MEDIUM < LONG < EXTREME。这个字段暗示了数据块
+	 * 的更新频率，比如WRITE_LIFE_SHORT就暗示了数据块将很快被更新，更新频繁的数据称为热数据（hot），
+	 * 反之为冷数据（cold），f2fs还定义了介于二者之间的warm数据。
+	 * 
+	 * 引入该字段的目的：
+	 * flash设备以page为单位写，以block为单位擦除，一个block含32~256个page，并且由于flash电路特性，
+	 * 只能将1写成0，0擦除成1，所以当一个block中非全1时，需擦除后才能写入数据（即“写前擦除特性”）。
+	 * 如果一个block中冷热数据混存，热数据更新时，flash FTL需要将block中的有效页拷贝到其他空闲bloc
+	 * k中，然后写入数据，原来的block需要擦除后待用。在这过程中引入了写放大WAF（Write Amplification
+	 * Factor）、器件寿命磨损两个问题。如果做到冷热数据分离，可减少冷数据的拷贝即擦除，避免上述两个
+	 * 问题的负面影响。（mark，flash特性待整理）
+	 *
+	 * 具体用法：kernel代码中f2fs、nvme用到了这个属性（这两个模块都与flash相关的）。
+	 * 1）fcntl通过F_SET_RW_HINT设置inode->i_write_hint，对这个文件的写操作，会将该标记传给
+	 * bio->bi_write_hint。（可选，用户主动设置）。
+	 * 2）f2fs根据自身文件系统的特点，对自己定义的结构NODE、DATA分成了HOT、WARM、COLD三种类型，举例
+	 * 来说COLD_DATA对应WRITE_LIFE_EXTREME，在文件系统层做冷热数据分离。
+	 * 3）nvme1.3支持Multi-Stream Write,FTL根据WRITE_LIFE_XX将相同life lime的数据写入相同的block中，
+	 * 做到冷热数据分离。*/
 	unsigned short		bi_write_hint;
+
+	/* bio的执行结果，BLK_STS_XX（其中XX为OK、NOTSUPP、TIMEOOUT……等多个状态，定义在include/linux/blk_types.h中）*/
 	blk_status_t		bi_status;
+	/* 一个存储器件逻辑上被划分成多个分区，bi_partno表示分区号 */
 	u8			bi_partno;
+
+	/* bio chain特性用到__bi_remaining。何时形成 bio chain？两个场景：
+	 * 1）bio拆分时，拆分后的bio形成bio chain（拆分后的多个bio，通过bio->bi_private指向前一个bio，以此类推）。
+	 * 该流程见后文“bio的merge、split”。
+	 * 2）md raid4、raid5、raid6涉及多条带（multi stripe）io时，每个stripe上的访问对应一个bio，这些bio通过bi->bi_next形成bio
+	 * chain。以读分布在2个stripe上的数据为例，bio1、bio2（组成了bio chain）分别读两个stripe上的数据，然后聚合成最终的数据返
+	 * 回给用户。该流程见make_request（raid456的回调为raid5_make_request）-->
+	 * add_stripe_bio函数。
+	 *
+	 * __bi_remaining用途：代表bio chain中还有几个bio没有处理完，默认值为1。对某一个bio每split产生一个新的bio，__bi_remaining
+	 * 加1。chain类型的bio的回调函数为bio_chain_endio，bio_chain_endio-->bio_endio-->bio_remaining_done将__bi_remaining减1后
+	 * 判断__bi_remaining是否为0，不为0说明bio并没有处理完（目前只是完成了chain中一个bio），bio_endio直接返回，只有当
+	 * __bi_remaining为0了，bio_endio才会正在地执行。*/
 	atomic_t		__bi_remaining;
 
+	/* bi_iter指示bio的处理进度（存储器件端起始sector、还剩多少个字节需要读写；
+	 * 内存端当前操作的vector是哪个、当前vector中已经完成了多少个字节）. */
 	struct bvec_iter	bi_iter;
 
+	/* bio完成时的回调函数，不同驱动、不同文件系统、不同类型的io的回调处理函数是不一样的.*/
 	bio_end_io_t		*bi_end_io;
 
+	/* 各功能模块的私有指针，用于实现特殊功能。用途很多，列举部分：
+	 * 1)bio chain用bi_private指向parent bio，将一系列关联的bio组成chain。md、bio的拆分都会形成bio chain。
+	 * 2)submit_bio_wait需要等待bio完成，bi_private指向完成量completion
+	 * 3)direct io用bi_private将读类型bio组成bio_dirty_list（direct io写类型不需处理）。*/
 	void			*bi_private;
 #ifdef CONFIG_BLK_CGROUP
 	/*
@@ -239,22 +298,41 @@ struct bio {
 
 	union {
 #if defined(CONFIG_BLK_DEV_INTEGRITY)
+		/* 用于实现end-to-end数据完整性校验功能。T10委员会定义了T10 Protection Information
+		 * Model（简称PIM），只规定了host adapter 和storage device之间数据完整性校验规范。
+		 * 为了做到end-to-end，bi_integrity中存放校验数据，实现系统调用到I/O controller之间
+		 * 数据完整性校验，该机制称作Data Integrity Extensions（简称DIX）。linux用DIX+PIM的
+		 * 方式就实现了end-to-end数据校验 */
 		struct bio_integrity_payload *bi_integrity; /* data integrity */
 #endif
 	};
 
+	/* bio中当前vector（简称bvec）数量，不能大于bio->bi_max_vecs。bio->bi_io_vec[bio->bi_vcnt]
+	 * 得到的vector是空闲可用的。read、write系统调对应的bio只有一个vector。readv、writev支持scatter-gather
+	 * io，会有多个vector。通过bio_add_hw_page、__bio_add_page往bio添加一个内存端属性时，bi_vcnt加1 */
 	unsigned short		bi_vcnt;	/* how many bio_vec's */
 
 	/*
 	 * Everything starting with bi_max_vecs will be preserved by bio_reset()
 	 */
 
+	/* bio中vector最大值，分配bio时设置，见bio_alloc_bioset、bio_init函数 */
 	unsigned short		bi_max_vecs;	/* max bvl_vecs we can hold */
 
+	/* bio的引用计数，__bi_cnt大于0，bio_put不会释放bio内存。*/
 	atomic_t		__bi_cnt;	/* pin count */
 
+	/* bio中的vector（简称bvec）数量小于等于BIO_INLINE_VECS（值为4）时，bio->bi_io_vec指向bio内嵌的
+	 * bio->bi_inline_vecs,否则指向按需分配的vector地址。不管是bio->bi_inline_vecs还是按需分配的vector，
+	 * 这些vector在虚拟地址上是连续的，本质上就是一个元素为struct bio_vec的数组，bio->bi_io_vec指向数组
+	 * 第一个元素，将地址（bio->bi_io_vec）加1即可得到下一个元素（bvec） */
 	struct bio_vec		*bi_io_vec;	/* the actual vec list */
 
+	/* bio结构体在内核中会频繁的申请、释放，为了提升性能、避免内存碎片，内核用slab管理bio内存，slab中存
+	 * 放相同大小的object（object就是struct bio），这些objcect就构成了内存池。需要bio时，从内存池申请，
+	 * 释放时返回给内存池。bi_pool就指向某个内存池。内核各个模块在使用bio时，会在stuct bio前、后填充一些
+	 * 自己的数据，即各个模块需要的bio的大小是不同的，所以我们在代码中会看到fs_bio_set、blkdev_dio_pool、
+	 * iomap_ioend_bioset、f2fs_bioset、btrfs_bioset等这些bio内存池。*/
 	struct bio_set		*bi_pool;
 
 	/*
@@ -262,6 +340,8 @@ struct bio {
 	 * double allocations for a small number of bio_vecs. This member
 	 * MUST obviously be kept at the very end of the bio.
 	 */
+	/* bio内嵌了BIO_INLINE_VECS（值为4）个vector（struct bio_vec）。若bio需要的vector数量小于等于
+	 * BIO_INLINE_VECS，那么直接用这里预定义的bi_inline_vecs，否则按需申请连续的vector */
 	struct bio_vec		bi_inline_vecs[];
 };
 
