@@ -39,7 +39,9 @@ struct backing_dev_info;
  * fs/fs-writeback.c
  */
 enum writeback_sync_modes {
+	/* 不会等待回写结束，一般用于周期性回写 */
 	WB_SYNC_NONE,	/* Don't wait on anything */
+	/* 会等待回写结束，用于sync之类的强制回写 */
 	WB_SYNC_ALL,	/* Wait on every mapping */
 };
 

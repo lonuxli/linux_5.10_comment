@@ -1748,6 +1748,7 @@ int __block_write_full_page(struct inode *inode, struct page *page,
 	 * Get all the dirty buffers mapped to disk addresses and
 	 * handle any aliases from the underlying blockdev's mapping.
 	 */
+	/* 循环遍历page关联的buffer_head，block为与之相关的文件内块索引值 */
 	do {
 		if (block > last_block) {
 			/*
@@ -1758,10 +1759,14 @@ int __block_write_full_page(struct inode *inode, struct page *page,
 			/*
 			 * The buffer was zeroed by block_write_full_page()
 			 */
+			/* 超出文件大小的bh无需回写存储介质 */
 			clear_buffer_dirty(bh);
 			set_buffer_uptodate(bh);
 		} else if ((!buffer_mapped(bh) || buffer_delay(bh)) &&
 			   buffer_dirty(bh)) {
+			/* 以下两种情况需通过get_block建立buffer_head与存储介质映射
+			 * 1)buffer_head未与存储介质逻辑块映射且为dirty状态
+			 * 2)buffer_head对应存储介质中还未分配逻辑块且bh为dirty状态*/
 			WARN_ON(bh->b_size != blocksize);
 			err = get_block(inode, block, bh, 1);
 			if (err)
@@ -2981,6 +2986,7 @@ int block_write_full_page(struct page *page, get_block_t *get_block,
 					       end_buffer_async_write);
 
 	/* Is the page fully outside i_size? (truncate in progress) */
+	/* page完全在文件外，跟文件尾无交叉，则直接返回0 */
 	offset = i_size & (PAGE_SIZE-1);
 	if (page->index >= end_index+1 || !offset) {
 		unlock_page(page);
@@ -2994,6 +3000,8 @@ int block_write_full_page(struct page *page, get_block_t *get_block,
 	 * the  page size, the remaining memory is zeroed when mapped, and
 	 * writes to that region are not written out to the file."
 	 */
+	/* page 横跨i_size，即横跨文件尾，有一部分在文件内一部分在文件外，则需将文件
+	 * 外的page内存置0 */
 	zero_user_segment(page, offset, PAGE_SIZE);
 	return __block_write_full_page(inode, page, get_block, wbc,
 							end_buffer_async_write);
