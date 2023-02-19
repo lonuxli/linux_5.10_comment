@@ -1109,6 +1109,7 @@ xlog_assign_tail_lsn_locked(
 	 * track of the last LSN which was committed in log->l_last_sync_lsn,
 	 * and use that when the AIL was empty.
 	 */
+	//tail lsn: Log sequence number of the first log record with uncommitted buffers.
 	lip = xfs_ail_min(mp->m_ail);
 	if (lip)
 		tail_lsn = lip->li_lsn;
@@ -2232,6 +2233,7 @@ xlog_write_copy_finish(
 	int			error;
 
 	if (*partial_copy) {
+		//进这里表示由this,当前iclog也没空间了
 		/*
 		 * This iclog has already been marked WANT_SYNC by
 		 * xlog_state_get_iclog_space.
@@ -2247,6 +2249,7 @@ xlog_write_copy_finish(
 	*partial_copy_len = 0;
 
 	if (iclog->ic_size - log_offset <= sizeof(xlog_op_header_t)) {
+		//进入这里表示没有partial_copy,但是当前iclog也没有空间了
 		/* no more space in this iclog - push it. */
 		spin_lock(&log->l_icloglock);
 		xlog_state_finish_copy(log, iclog, *record_cnt, *data_cnt);
@@ -2331,6 +2334,7 @@ xlog_write(
 	int			partial_copy = 0;
 	int			partial_copy_len = 0;
 	int			contwr = 0;
+	//这里record_cnt表示的是op的数量
 	int			record_cnt = 0;
 	int			data_cnt = 0;
 	int			error = 0;
@@ -2349,6 +2353,7 @@ xlog_write(
 		xfs_force_shutdown(log->l_mp, SHUTDOWN_LOG_IO_ERROR);
 	}
 
+	/*len为本次要写入的iovec+op*nums头的总长度*/
 	len = xlog_write_calc_vec_length(ticket, log_vector, need_start_rec);
 	*start_lsn = 0;
 	while (lv && (!lv->lv_niovecs || index < lv->lv_niovecs)) {
@@ -2395,11 +2400,13 @@ xlog_write(
 			 * iclog we write to.
 			 */
 			if (need_start_rec) {
+				/*将start op (op 0)头写入ptr*/
 				xlog_write_start_rec(ptr, ticket);
 				xlog_write_adv_cnt(&ptr, &len, &log_offset,
 						sizeof(struct xlog_op_header));
 			}
 
+			/*将本次循环的op头写入ptr*/
 			ophdr = xlog_write_setup_ophdr(log, ptr, ticket, flags);
 			if (!ophdr)
 				return -EIO;
@@ -2438,6 +2445,9 @@ xlog_write(
 			}
 			data_cnt += contwr ? copy_len : 0;
 
+			//如果是partial_copy,那么该函数会进入重置record_cnt和
+			//data_cnt,并释当前iclog锁,后面跳出去重新选择下一个新
+			//的iclog
 			error = xlog_write_copy_finish(log, iclog, flags,
 						       &record_cnt, &data_cnt,
 						       &partial_copy,
@@ -2459,6 +2469,8 @@ xlog_write(
 			 * this was the last record, though, we are done and
 			 * can just return.
 			 */
+			//如果partial_copy,表示只有部分数据拷贝进当前iclog的缓
+			//存中,那么需要break出去选择下一个iclog
 			if (partial_copy)
 				break;
 
@@ -2470,6 +2482,9 @@ next_lv:
 					vecp = lv->lv_iovecp;
 			}
 			if (record_cnt == 0 && !ordered) {
+				//运行到此处,表示没有partial_copy,但是当前的
+				//iclog也没空间了,因此在xlog_write_copy_finish
+				//将record_cnt置0???
 				if (!lv)
 					return 0;
 				break;
@@ -2898,6 +2913,8 @@ restart:
 		XFS_STATS_INC(log->l_mp, xs_log_noiclogs);
 
 		/* Wait for log writes to have flushed */
+		/* log->l_iclog表示当前可以用的iclog?等待时调度出去需要先释放
+		 * l_icloglock,这样的话,当有新的可用的iclog时就能拿到.*/
 		xlog_wait(&log->l_flush_wait, &log->l_icloglock);
 		goto restart;
 	}
@@ -2913,6 +2930,10 @@ restart:
 	 * must be written.
 	 */
 	if (log_offset == 0) {
+		//第一次写iclog时会进入,如果拿到的是一个新的iclog,log_offset必然
+		//为0,因此第一次写iclog会进入.xlog_state_switch_iclogs中会更新
+		//l_curr_block的值(也可能会更新l_curr_cycle),因此一个trans中的每
+		//个record的lsn都会不一样.
 		ticket->t_curr_res -= log->l_iclog_hsize;
 		xlog_tic_add_region(ticket,
 				    log->l_iclog_hsize,

@@ -231,7 +231,10 @@ struct xfs_cil;
 struct xfs_cil_ctx {
 	struct xfs_cil		*cil;
 	xfs_csn_t		sequence;	/* chkpt sequence # */
+	/*trans中第一个record的lsn*/
 	xfs_lsn_t		start_lsn;	/* first LSN of chkpt commit */
+	/*trans中最后一个record(包含commit op)的record的lsn, 如果trans只有一个
+	 * record,则等于start_lsn*/
 	xfs_lsn_t		commit_lsn;	/* chkpt commit record lsn */
 	struct xlog_ticket	*ticket;	/* chkpt ticket */
 	int			nvecs;		/* number of regions */

@@ -811,6 +811,7 @@ xlog_cil_push_work(
 	lvhdr.lv_iovecp = &lhdr;
 	lvhdr.lv_next = ctx->lv_chain;
 
+	//更新ctx->start_lsn
 	error = xlog_write(log, &lvhdr, tic, &ctx->start_lsn, NULL, 0, true);
 	if (error)
 		goto out_abort_free_ticket;
@@ -839,6 +840,10 @@ restart:
 		if (new_ctx->sequence >= ctx->sequence)
 			continue;
 		if (!new_ctx->commit_lsn) {
+			//在xc_committing链表中有比当前ctx seq小的,并且还
+			//更新commit_lsn(即没完成commit的)ctx,则需要等待
+			//ctx添加到xc_committing链表和设置commit_lsn不是
+			//在work里面串行的吗?会存在这种情况吗?
 			/*
 			 * It is still being pushed! Wait for the push to
 			 * complete, then start again from the beginning.
@@ -849,6 +854,7 @@ restart:
 	}
 	spin_unlock(&cil->xc_push_lock);
 
+	/*向iclog中写入最后一条commit op*/
 	error = xlog_commit_record(log, tic, &commit_iclog, &commit_lsn);
 	if (error)
 		goto out_abort_free_ticket;
@@ -871,11 +877,15 @@ restart:
 	 * and wake up anyone who is waiting for the commit to complete.
 	 */
 	spin_lock(&cil->xc_push_lock);
+	//更新ctx->commit_lsn
 	ctx->commit_lsn = commit_lsn;
 	wake_up_all(&cil->xc_commit_wait);
 	spin_unlock(&cil->xc_push_lock);
 
 	/* release the hounds! */
+	//这里release之后引用计数才能减到0,iclog转移到SYNCING状态,启动io
+	//commit_iclog应该只是trans中最后一个存放有commit op的iclog,该
+	//trans中前面的iclog应该发现空间不足时就调用了xfs_log_release_iclog
 	xfs_log_release_iclog(commit_iclog);
 	return;
 
@@ -916,6 +926,8 @@ xlog_cil_push_background(
 	 * space available yet.
 	 */
 	if (cil->xc_ctx->space_used < XLOG_CIL_SPACE_LIMIT(log)) {
+		//如果还没有用完可用空间,则直接返回,不做后台push
+		//那么可用空间是指什么?如何判断可用空间够不够?
 		up_read(&cil->xc_ctx_lock);
 		return;
 	}
@@ -975,6 +987,7 @@ xlog_cil_push_now(
 	ASSERT(push_seq && push_seq <= cil->xc_current_sequence);
 
 	/* start on any pending background push to minimise wait time on it */
+	//同步等待前一次提交的工作已经完成
 	flush_work(&cil->xc_push_work);
 
 	/*
@@ -982,11 +995,14 @@ xlog_cil_push_now(
 	 * there's no work we need to do.
 	 */
 	spin_lock(&cil->xc_push_lock);
+	//1.如果cil链表为空,没有item则无需启动push work
+	//2.如果目标push_seq小于或等于已经push的seq cil->xc_push_seq,也无需启动
 	if (list_empty(&cil->xc_cil) || push_seq <= cil->xc_push_seq) {
 		spin_unlock(&cil->xc_push_lock);
 		return;
 	}
 
+	//修改cil->xc_push_seq(变大),增大push的目标
 	cil->xc_push_seq = push_seq;
 	queue_work(log->l_mp->m_cil_workqueue, &cil->xc_push_work);
 	spin_unlock(&cil->xc_push_lock);

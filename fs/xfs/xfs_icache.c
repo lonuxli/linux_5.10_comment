@@ -167,6 +167,8 @@ xfs_perag_set_reclaim_tag(
 
 	/* propagate the reclaim tag up into the perag radix tree */
 	spin_lock(&mp->m_perag_lock);
+	/* pag->pag_ici_root和mp->m_perag_tree有什么区别? 
+	 * 所有的ag组成的tree, 以ag号为序的基数树组成 */
 	radix_tree_tag_set(&mp->m_perag_tree, pag->pag_agno,
 			   XFS_ICI_RECLAIM_TAG);
 	spin_unlock(&mp->m_perag_lock);
@@ -212,6 +214,7 @@ xfs_inode_set_reclaim_tag(
 	spin_lock(&pag->pag_ici_lock);
 	spin_lock(&ip->i_flags_lock);
 
+	/* 标记AG内部的inode tag, 即以AG内部的ino号为序 */
 	radix_tree_tag_set(&pag->pag_ici_root, XFS_INO_TO_AGINO(mp, ip->i_ino),
 			   XFS_ICI_RECLAIM_TAG);
 	xfs_perag_set_reclaim_tag(pag);

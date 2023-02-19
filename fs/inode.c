@@ -1627,6 +1627,7 @@ static void iput_final(struct inode *inode)
 	else
 		drop = generic_drop_inode(inode);
 
+	// drop为true表示什么意思? 
 	if (!drop &&
 	    !(inode->i_state & I_DONTCACHE) &&
 	    (sb->s_flags & SB_ACTIVE)) {
@@ -1671,8 +1672,10 @@ void iput(struct inode *inode)
 		return;
 	BUG_ON(inode->i_state & I_CLEAR);
 retry:
+	/* inode->i_count减1,如果减到0,则返回true,并lock */
 	if (atomic_dec_and_lock(&inode->i_count, &inode->i_lock)) {
 		if (inode->i_nlink && (inode->i_state & I_DIRTY_TIME)) {
+			/* 什么情况下会进来? */
 			atomic_inc(&inode->i_count);
 			spin_unlock(&inode->i_lock);
 			trace_writeback_lazytime_iput(inode);
